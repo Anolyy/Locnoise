@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>WebApp Khử Noise Tạp Âm</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #f4f4f9;
+      color: #333;
+    }
+    h1 { text-align: center; color: #2c3e50; }
+    .container { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+    input, button { margin: 10px 0; padding: 10px; font-size: 16px; }
+    button {
+      background: #3498db; color: white; border: none; border-radius: 6px; cursor: pointer; padding: 12px 20px;
+    }
+    button:hover { background: #2980b9; }
+    button:disabled { background: #95a5a6; cursor: not-allowed; }
+    audio { width: 100%; margin-top: 20px; }
+    .status { margin-top: 15px; font-style: italic; color: #7f8c8d; }
+    .progress { width: 100%; height: 8px; background: #ecf0f1; border-radius: 4px; margin: 15px 0; overflow: hidden; }
+    .progress-bar { height: 100%; width: 0; background: #27ae60; transition: width 0.3s; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🧹 Khử Noise Tạp Âm</h1>
+    <p>Chọn file âm thanh để loại bỏ tiếng ồn nền bằng AI (RNNoise).</p>
+
+    <input type="file" id="audioInput" accept="audio/*" />
+    <br/>
+    <button id="processBtn" disabled>Khử Noise</button>
+    <button id="downloadBtn" style="display:none;">Tải File Đã Xử Lý</button>
+
+    <div class="progress"><div class="progress-bar" id="progress"></div></div>
+    <div class="status" id="status">Chưa có file được chọn.</div>
+
+    <h3>Âm thanh gốc</h3>
+    <audio id="originalAudio" controls></audio>
+
+    <h3>Âm thanh sau khi khử noise</h3>
+    <audio id="denoisedAudio" controls></audio>
+  </div>
+
+  <!-- Tải RNNoise WASM -->
+  <script src="https://unpkg.com/rnnoise-wasm@0.0.4/dist/rnnoise.js"></script>
+  <script>
+    let rnnoise = null;
+    let originalBlob = null;
+    let denoisedBlob = null;
+
+    // Khởi tạo RNNoise
+    async function initRNNoise() {
+      if (!rnnoise) {
+        document.getElementById("status").textContent = "Đang tải mô hình RNNoise...";
+        rnnoise = await RNNoiseNode.create(new AudioContext());
+        document.getElementById("status").textContent = "Mô hình đã sẵn sàng!";
+      }
+    }
+
+    // Xử lý khi chọn file
+    document.getElementById("audioInput").addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      originalBlob = file;
+      const url = URL.createObjectURL(file);
+
+      const originalAudio = document.getElementById("originalAudio");
+      originalAudio.src = url;
+
+      document.getElementById("processBtn").disabled = false;
+      document.getElementById("status").textContent = `Đã chọn: ${file.name}`;
+      document.getElementById("downloadBtn").style.display = "none";
+      denoisedBlob = null;
+    });
+
+    // Xử lý khử noise
+    document.getElementById("processBtn").addEventListener("click", async () => {
+      if (!originalBlob) return;
+
+      await initRNNoise();
+
+      const processBtn = document.getElementById("processBtn");
+      const status = document.getElementById("status");
+      const progress = document.getElementById("progress");
+
+      processBtn.disabled = true;
+      status.textContent = "Đang xử lý...";
+      progress.style.width = "0%";
+
+      try {
+        // Đọc file thành ArrayBuffer
+        const arrayBuffer = await originalBlob.arrayBuffer();
+        const audioCtx = new AudioContext();
+        const audioBuffer = await audioCtx.decodeAudioBuffer(arrayBuffer);
+
+        if (audioBuffer.sampleRate !== 48000) {
+          status.textContent = "Lỗi: Chỉ hỗ trợ file 48kHz. Đang chuyển mẫu...";
+          const offlineCtx = new OfflineAudioContext(1, audioBuffer.duration * 48000, 48000);
+          const source = offlineCtx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(offlineCtx.destination);
+          source.start();
+          const resampled = await offlineCtx.startRendering();
+          audioBuffer = resampled;
+        }
+
+        const input = audioBuffer.getChannelData(0);
+        const output = new Float32Array(input.length);
+
+        const frameSize = 480; // RNNoise xử lý 10ms/frame tại 48kHz
+        let processed = 0;
+
+        for (let i = 0; i < input.length; i += frameSize) {
+          const frame = input.subarray(i, i + frameSize);
+          if (frame.length < frameSize) break;
+
+          const denoisedFrame = rnnoise.processFrame(frame);
+          output.set(denoisedFrame, i);
+
+          processed += frameSize;
+          progress.style.width = `${(processed / input.length) * 100}%`;
+        }
+
+        // Tạo AudioBuffer mới
+        const denoisedBuffer = audioCtx.createBuffer(1, output.length, 48000);
+        denoisedBuffer.copyToChannel(output, 0);
+
+        // Xuất thành Blob WAV
+        denoisedBlob = bufferToWave(denoisedBuffer);
+
+        const url = URL.createObjectURL(denoisedBlob);
+        document.getElementById("denoisedAudio").src = url;
+        document.getElementById("downloadBtn").style.display = "inline-block";
+
+        status.textContent = "Hoàn tất! Đã khử noise thành công.";
+      } catch (err) {
+        console.error(err);
+        status.textContent = "Lỗi: " + err.message;
+      } finally {
+        processBtn.disabled = false;
+      }
+    });
+
+    // Tải xuống
+    document.getElementById("downloadBtn").addEventListener("click", () => {
+      if (!denoisedBlob) return;
+      const url = URL.createObjectURL(denoisedBlob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "denoised_audio.wav";
+      a.click();
+    });
+
+    // Hàm chuyển AudioBuffer sang WAV Blob
+    function bufferToWave(abuffer) {
+      const numChannels = abuffer.numberOfChannels;
+      const sampleRate = abuffer.sampleRate;
+      const format = 3; // PCM float32
+      const bitDepth = 32;
+
+      let result;
+      if (numChannels === 2) {
+        result = interleave(abuffer.getChannelData(0), abuffer.getChannelData(1));
+      } else {
+        result = abuffer.getChannelData(0);
+      }
+
+      const buffer = new ArrayBuffer(44 + result.length * 4);
+      const view = new DataView(buffer);
+
+      // RIFF header
+      writeString(view, 0, 'RIFF');
+      view.setUint32(4, 36 + result.length * 4, true);
+      writeString(view, 8, 'WAVE');
+      // FMT sub-chunk
+      writeString(view, 12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, format, true); // float
+      view.setUint16(22, numChannels, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * numChannels * bitDepth/8, true);
+      view.setUint16(32, numChannels * bitDepth/8, true);
+      view.setUint16(34, bitDepth, true);
+      // Data sub-chunk
+      writeString(view, 36, 'data');
+      view.setUint32(40, result.length * 4, true);
+
+      floatTo16BitPCM(view, 44, result);
+
+      return new Blob([buffer], { type: 'audio/wav' });
+    }
+
+    function interleave(inputL, inputR) {
+      const result = new Float32Array(inputL.length + inputR.length);
+      for (let i = 0; i < inputL.length; ++i) {
+        result[i * 2] = inputL[i];
+        result[i * 2 + 1] = inputR[i];
+      }
+      return result;
+    }
+
+    function floatTo16BitPCM(output, offset, input) {
+      for (let i = 0; i < input.length; i++, offset += 4) {
+        const s = Math.max(-1, Math.min(1, input[i]));
+        output.setFloat32(offset, s, true);
+      }
+    }
+
+    function writeString(view, offset, string) {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+      }
+    }
+  </script>
+</body>
+</html>
